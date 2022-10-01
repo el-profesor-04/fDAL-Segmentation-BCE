@@ -1,0 +1,7 @@
+checkpoint.pt
+
+
+dir_to_ignore/
+env
+.ipynb_checkpoints
+__pycache__
