@@ -20,7 +20,7 @@ class fDALLearner(nn.Module):
         :param aux_head: (optional) if specified with use the provided head as the domain-discriminator. If not will create it based on tashhead as described in the paper.
         :param grl_params: dict with grl_params.
         """
-	# model = (h, h', g) == (task head, aux head, backbone)
+	    # model = (h, h', g) == (task head, aux head, backbone)
 
         super(fDALLearner, self).__init__()
         #self.backbone = backbone
@@ -32,13 +32,13 @@ class fDALLearner(nn.Module):
         self.n_classes = n_classes
         self.reg_coeff = reg_coef
         
-	#self.auxhead = aux_head if aux_head is not None else self.build_aux_head_()
+	    #self.auxhead = aux_head if aux_head is not None else self.build_aux_head_()
 
         self.fdal_divhead = fDALDivergenceHead(divergence, n_classes=self.n_classes,
                                                grl_params=grl_params,
                                                reg_coef=reg_coef)
 
-    def build_aux_head_(self):
+    '''def build_aux_head_(self):
         # fDAL recommends the same architecture for both h, h'
         auxhead = copy.deepcopy(self.taskhead)
         if self.n_classes == -1:
@@ -50,7 +50,7 @@ class fDALLearner(nn.Module):
 
         # different initialization.
         auxhead.apply(lambda self_: self_.reset_parameters() if hasattr(self_, 'reset_parameters') else None)
-        return auxhead
+        return auxhead'''
 
     def forward(self, x, y, src_size=-1, trg_size=-1):
         """
@@ -72,12 +72,14 @@ class fDALLearner(nn.Module):
             intrins = torch.cat((x[0][3], x[1][3]), dim=0)
             post_rots = torch.cat((x[0][4], x[1][4]), dim=0)
             post_trans = torch.cat((x[0][5], x[1][5]), dim=0)
+            aug_imgs = x[1][6]
             #print(post_trans.shape,'in fdal learner')
 
         y_s = y
         y_t = None
 
         if isinstance(y, tuple):
+            print('y is tuple ????.....')
             # assume y=y_source, y_target, otherwise assume y=y_source
             # warnings.warn_explicit('using target data')
             y_s = y[0]
@@ -97,34 +99,43 @@ class fDALLearner(nn.Module):
         outputs_src = net_output.narrow(0, 0, src_size)
         outputs_tgt = net_output.narrow(0, src_size, trg_size)
 
-	
+        #print(outputs_src.shape,'h out shape')
+        #print(aux_output.shape,"h' out shape")
         # computing losses....
 
         #print(y_s,'label source...')
         # task loss in source...
-        task_loss = self.taskloss(outputs_src, y_s)
-
+        #print(outputs_src.shape,y_s.shape,'cross en loss.......')
+        #print(y_s,'ys')
+        #print(torch.bincount(y_s.flatten()),'ys binct....')
+        task_loss = self.taskloss(outputs_src, y_s)    
 
         # task loss in target if labels provided. Warning!. Only on semi-sup adaptation.
         task_loss += 0.0 if y_t is None else self.taskloss(outputs_tgt, y_t)
 
+        #I = (outputs_tgt>=0.9).long()
+        #beta = 5.0
+        #aug_h, aug_hprime, _ = self.model(aug_imgs, x[1][1], x[1][2], x[1][3], x[1][4], x[1][5])
+        #pseudo_loss = torch.mean(beta*I*torch.log(aug_h+0.001)) + torch.mean(I*torch.log(1.001-aug_h)) 
+
+
+        #print(task_loss,'after if y_t')
         fdal_loss = 0.0
         if self.reg_coeff > 0.:
             # adaptation
             fdal_loss = self.fdal_divhead(aux_output, outputs_src, outputs_tgt, src_size, trg_size)
 
             # together
-            total_loss = task_loss + fdal_loss
+            #print(fdal_loss,'fdal loss\n')
+
+            total_loss = task_loss + fdal_loss #+ pseudo_loss
         else:
             total_loss = task_loss
 
-        pseudo_loss = 0.0
-        pi = torch.flatten(outputs_tgt)
-        #pi = pi[]
 
-        return total_loss, {"pred_s": outputs_src, "pred_t": outputs_tgt, "taskloss": task_loss, "fdal_loss": fdal_loss,
-                            "fdal_src": self.fdal_divhead.internal_stats["lhatsrc"],
-                            "fdal_trg": self.fdal_divhead.internal_stats["lhattrg"]}
+        return total_loss, {"pred_s": outputs_src, "pred_t": outputs_tgt, "taskloss": task_loss}#, "fdal_loss": fdal_loss,
+                            #"fdal_src": self.fdal_divhead.internal_stats["lhatsrc"],
+                            #"fdal_trg": self.fdal_divhead.internal_stats["lhattrg"]}
 
     def get_reusable_model(self, pack=False):
         """

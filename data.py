@@ -3,6 +3,7 @@ import os
 import numpy as np
 from PIL import Image
 import cv2
+import torchvision
 from pyquaternion import Quaternion
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.splits import create_splits_scenes
@@ -10,7 +11,7 @@ from nuscenes.utils.data_classes import Box
 from glob import glob
 
 from tools import get_lidar_data, img_transform, normalize_img, gen_dx_bx
-
+from RAugment import RandAugment
 
 class NuscData(torch.utils.data.Dataset):
     def __init__(self, nusc, is_train, data_aug_conf, grid_conf):
@@ -119,6 +120,7 @@ class NuscData(torch.utils.data.Dataset):
         intrins = []
         post_rots = []
         post_trans = []
+        augment = []
         for cam in cams:
             samp = self.nusc.get('sample_data', rec['data'][cam])
             imgname = os.path.join(self.nusc.dataroot, samp['filename'])
@@ -146,6 +148,11 @@ class NuscData(torch.utils.data.Dataset):
             post_rot = torch.eye(3)
             post_tran[:2] = post_tran2
             post_rot[:2, :2] = post_rot2
+            to_tensor_img = torchvision.transforms.ToTensor()
+            aug_img = to_tensor_img(img)
+            aug_img*=255
+            aug_img = aug_img.to(torch.uint8)
+            augment.append(aug_img)
 
             imgs.append(normalize_img(img))
             intrins.append(intrin)
@@ -158,9 +165,14 @@ class NuscData(torch.utils.data.Dataset):
         #print(torch.stack(rots).shape,torch.stack(trans).shape,torch.stack(intrins).shape,torch.stack(post_rots).shape,torch.stack(post_trans).shape)
         #print(torch.stack(imgs).shape)
         #print('nuscenes...............')
+        RandomAugment = RandAugment()
+        augment = RandomAugment(augment)
+        norm_img = torchvision.transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229, 0.244, 0.225])
+        for i,aug in enumerate(augment):
+            augment[i] = norm_img(aug/255.0)
         
         return (torch.stack(imgs), torch.stack(rots), torch.stack(trans),
-                torch.stack(intrins), torch.stack(post_rots), torch.stack(post_trans))
+                torch.stack(intrins), torch.stack(post_rots), torch.stack(post_trans), torch.stack(augment))
 
     def get_lidar_data(self, rec, nsweeps):
         pts = get_lidar_data(self.nusc, rec,
@@ -215,7 +227,7 @@ class VizData(NuscData):
         rec = self.ixes[index]
         
         cams = self.choose_cams()
-        imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(rec, cams)
+        imgs, rots, trans, intrins, post_rots, post_trans, aug_imgs = self.get_image_data(rec, cams)
         lidar_data = self.get_lidar_data(rec, nsweeps=3)
         binimg = self.get_binimg(rec)
         
@@ -230,10 +242,10 @@ class SegmentationData(NuscData):
         rec = self.ixes[index]
 
         cams = self.choose_cams()
-        imgs, rots, trans, intrins, post_rots, post_trans = self.get_image_data(rec, cams)
+        imgs, rots, trans, intrins, post_rots, post_trans, aug_imgs = self.get_image_data(rec, cams)
         binimg = self.get_binimg(rec)
         
-        return imgs, rots, trans, intrins, post_rots, post_trans, binimg
+        return imgs, rots, trans, intrins, post_rots, post_trans, binimg, aug_imgs
 
 
 def worker_rnd_init(x):

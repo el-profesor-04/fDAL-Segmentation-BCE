@@ -220,9 +220,9 @@ class QuickCumsum(torch.autograd.Function):
 
 
 class SimpleLoss(torch.nn.Module):
-    def __init__(self, device, pos_weight = 1):
+    def __init__(self, device, pos_weight = 5.0):
         super(SimpleLoss, self).__init__()
-        self.loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([pos_weight]))
+        self.loss_fn = torch.nn.BCELoss(weight=torch.Tensor([pos_weight]))
         self.loss_fn = self.loss_fn.to(device)
 
     def forward(self, ypred, ytgt):
@@ -233,8 +233,15 @@ class SimpleLoss(torch.nn.Module):
 def get_batch_iou(preds, binimgs):
     """Assumes preds has NOT been sigmoided yet
     """
+
+    #preds_c1 = preds[:,1:,:,:] # for class=1
+    #print(binimgs.shape,'binimgs shape... batch iou')
+    #binimgs = binimgs[:,1:,:,:] # for class=1
+    #print(preds_c1.shape,'predc1 shape......')
+    #print(torch.max(preds_c1),'predc1 max.......')
+
     with torch.no_grad():
-        pred = (preds > 0)
+        pred = (preds > 0.5)
         tgt = binimgs.bool()
         intersect = (pred & tgt).sum().float().item()
         union = (pred | tgt).sum().float().item()
@@ -257,6 +264,7 @@ def add_ego(bx, dx):
 
 
 def get_val_info(model, valloader, loss_fn, device, use_tqdm=False):
+    model = model.to(device)
     model.eval()
     total_loss = 0.0
     total_intersect = 0.0
@@ -264,29 +272,33 @@ def get_val_info(model, valloader, loss_fn, device, use_tqdm=False):
     print('running eval...')
     loader = tqdm(valloader) if use_tqdm else valloader
     loss_func = loss_fn(device)
+    ones_ct = 0
+    pred_max = 0
+    pred_min = 0
     with torch.no_grad():
-        for batch in loader:
-            allimgs, rots, trans, intrins, post_rots, post_trans, binimgs = batch
-            preds = model(allimgs.to(device), rots.to(device),
-                          trans.to(device), intrins.to(device), post_rots.to(device),
-                          post_trans.to(device))
+        for batch in tqdm(loader):
+            allimgs, rots, trans, intrins, post_rots, post_trans, binimgs, aug_imgs = batch
+            allimgs, rots, trans, intrins, post_rots, post_trans = allimgs.to(device), rots.to(device), trans.to(device), intrins.to(device), post_rots.to(device), post_trans.to(device)
             binimgs = binimgs.to(device)
+
+            preds = model(allimgs, rots, trans, intrins, post_rots, post_trans)
 
             # preds = (h, h prime, g)
 
-            # loss
             binpred = preds[0]
+            ones_ct += torch.sum((binpred>0.5).long())
+            pred_max = max(pred_max,torch.max(binpred))
+            pred_min = min(pred_min,torch.min(binpred))
 
             total_loss += loss_func(binpred, binimgs).item() * binpred.shape[0]
 
 
             # iou
-            intersect, union, _ = get_batch_iou(binpred, binimgs)
+            intersect, union, iou = get_batch_iou(binpred, binimgs) # iou changed from _
             total_intersect += intersect
             total_union += union
-
-    model.train()
+    print(ones_ct, pred_max, pred_min, "ones max min len->", len(valloader.dataset))
     return {
             'loss': total_loss / len(valloader.dataset),
-            'iou': total_intersect / total_union,
+            'iou': total_intersect/total_union,
             }

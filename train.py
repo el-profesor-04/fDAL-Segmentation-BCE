@@ -1,6 +1,11 @@
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 import cv2
 import torch
 from time import time
+
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
 
 from efficientnet_pytorch import EfficientNet
 #from matplotlib import pyplot as plt
@@ -148,51 +153,12 @@ class CarlaDataset(torch.utils.data.Dataset):
         return resize, resize_dims, crop, flip, rotate
 
 
-'''def get_val(model, val_loader, device, loss_fn, type):
-    model.eval()
-
-    total_loss = 0.0
-    total_intersect = 0.0
-    total_union = 0
-
-    print('running eval...')
-
-    with torch.no_grad():
-        for (imgs, img_segs, rots, trans, intrins, post_rots, post_trans, binimgs) in val_loader:
-
-            if type == "seg":
-                imgs = torch.cat((imgs, img_segs), 2)
-
-            preds = model(imgs.to(device), rots.to(device),
-                          trans.to(device), intrins.to(device), post_rots.to(device),
-                          post_trans.to(device))
-            binimgs = binimgs.to(device)
-
-            # loss
-            total_loss += loss_fn(preds, binimgs).item() * preds.shape[0]
-
-            # iou
-            intersect, union, _ = get_batch_iou(preds, binimgs)
-            total_intersect += intersect
-            total_union += union
-
-            cv2.imwrite("pred_val_" + type + ".jpg", np.array(preds.sigmoid().detach().cpu())[0, 0] * 255)
-            cv2.imwrite("binimgs_val_" + type + ".jpg", np.array(binimgs.detach().cpu())[0, 0] * 255)
-
-    model.train()
-
-    return {
-        'loss': total_loss / len(val_loader.dataset),
-        'iou': total_intersect / total_union,
-    }
-'''
-
 
 
 #############################################################
 
 def carla_dataloader(
-        dataroot='../Downloads/carla',
+        dataroot='/mnt/data/share/carla_dataset/carla_2',
         nepochs=10000,
         gpuid=0,
 
@@ -213,9 +179,9 @@ def carla_dataloader(
         zbound=[-10.0, 10.0, 20.0],
         dbound=[4.0, 45.0, 1.0],
 
-        bsz=4,
+        bsz=8,
         val_step=2000,
-        nworkers=10,
+        nworkers=0,
         lr=1e-3,
         weight_decay=1e-7,
 ):
@@ -241,18 +207,32 @@ def carla_dataloader(
     train_ticks = 7594
     val_ticks = 1404
 
-    train_dataset = CarlaDataset(os.path.join(dataroot, "train/"), data_aug_conf, train_ticks)
-    val_dataset = CarlaDataset(os.path.join(dataroot, "val/"), data_aug_conf, val_ticks)
+    train_dataset0 = CarlaDataset(os.path.join(dataroot, "train/agents/0/"), data_aug_conf, train_ticks)
+    train_dataset1 = CarlaDataset(os.path.join(dataroot, "train/agents/1/"), data_aug_conf, train_ticks)
+    train_dataset2 = CarlaDataset(os.path.join(dataroot, "train/agents/2/"), data_aug_conf, train_ticks)
+    train_dataset3 = CarlaDataset(os.path.join(dataroot, "train/agents/3/"), data_aug_conf, train_ticks)
+    val_dataset0 = CarlaDataset(os.path.join(dataroot, "val/agents/0/"), data_aug_conf, val_ticks)
+    val_dataset1 = CarlaDataset(os.path.join(dataroot, "val/agents/0/"), data_aug_conf, val_ticks)
+    val_dataset2 = CarlaDataset(os.path.join(dataroot, "val/agents/0/"), data_aug_conf, val_ticks)
+    val_dataset3 = CarlaDataset(os.path.join(dataroot, "val/agents/0/"), data_aug_conf, val_ticks)
+
+    train_dataset = torch.utils.data.ConcatDataset([train_dataset0,train_dataset1,train_dataset2,train_dataset3])
+    val_dataset = torch.utils.data.ConcatDataset([val_dataset0, val_dataset1, val_dataset2, val_dataset3])
+
+    #train_dataset = CarlaDataset(os.path.join(dataroot, "train/"), data_aug_conf, train_ticks)
+    #val_dataset = CarlaDataset(os.path.join(dataroot, "val/"), data_aug_conf, val_ticks)
+
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=bsz, shuffle=True,
                                                num_workers=nworkers, drop_last=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=bsz,
                                              shuffle=False, num_workers=nworkers)
 
+
     return train_loader, val_loader
 
-def nuscenes_dataloader(version='mini',
-            dataroot='../Downloads/nuscenes',
+def nuscenes_dataloader(version='trainval',
+            dataroot='../Downloads/nuscenes01',
             nepochs=10000,
             gpuid=1,
 
@@ -272,9 +252,9 @@ def nuscenes_dataloader(version='mini',
             zbound=[-10.0, 10.0, 20.0],
             dbound=[4.0, 45.0, 1.0],
 
-            bsz=4,
+            bsz=8,
             val_step=-1,
-            nworkers=10,
+            nworkers=0,
             lr=1e-3,
             weight_decay=1e-7,
             ):
@@ -317,11 +297,11 @@ def scheduler(optimizer_, init_lr_, decay_step_, gamma_):
             self.decay_step = decay_step
 
         def get_lr(self) -> float:
-            if ((self.iter_num + 1) % self.decay_step) == 0:
+            """if ((self.iter_num + 1) % self.decay_step) == 0:
                 lr = self.init_lr * self.gamma
-                self.init_lr = lr
+                self.init_lr = lr"""
 
-            return self.init_lr
+            return self.init_lr*((1-float(self.iter_num)/self.decay_step) ** self.gamma)
 
         def step(self):
             """Increase iteration number `i` by 1 and update learning rate in `optimizer`"""
@@ -345,10 +325,10 @@ def seed_all(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True  # False
 
-def sample_batch(train_source, train_target, device, indx):
+def sample_batch(train_source, train_target, device):
 
     (imgs_s, img_segs, rots_s, trans_s, intrins_s, post_rots_s, post_trans_s, binimgs_s) = next(train_source) #carla
-    (imgs_t, rots_t, trans_t, intrins_t, post_rots_t, post_trans_t, binimgs_t) = next(train_target) #nuscenes
+    (imgs_t, rots_t, trans_t, intrins_t, post_rots_t, post_trans_t, binimgs_t, aug_imgs) = next(train_target) #nuscenes
     
     imgs_s, rots_s, trans_s = imgs_s.to(device), rots_s.to(device), trans_s.to(device)
     intrins_s, post_rots_s, post_trans_s = intrins_s.to(device), post_rots_s.to(device), post_trans_s.to(device)
@@ -356,10 +336,19 @@ def sample_batch(train_source, train_target, device, indx):
     imgs_t, rots_t, trans_t = imgs_t.to(device), rots_t.to(device), trans_t.to(device)
     intrins_t, post_rots_t, post_trans_t = intrins_t.to(device), post_rots_t.to(device), post_trans_t.to(device)
     
+    #binimgs_s = binimgs_s.long()
+    #binimgs_s_c1 = (binimgs_s <= 0).float()
+    #print(binimgs_s.shape, binimgs_s_c1.shape,'shapes bi bc1...')
+    #binimgs_s = torch.cat((binimgs_s_c1, binimgs_s),dim=1)
+    #print(binimgs_s.shape,'after concat batch.....')
+    #print(torch.bincount(binimgs_s.flatten()),'label bin......')
+
+    aug_imgs = aug_imgs.to(device)
+
     binimgs_s = binimgs_s.to(device)
 
     X_s = (imgs_s, rots_s, trans_s, intrins_s, post_rots_s, post_trans_s)
-    X_t = (imgs_t, rots_t, trans_t, intrins_t, post_rots_t, post_trans_t)
+    X_t = (imgs_t, rots_t, trans_t, intrins_t, post_rots_t, post_trans_t, aug_imgs)
 
     return X_s, X_t, binimgs_s
 
@@ -369,7 +358,7 @@ def sample_batch(train_source, train_target, device, indx):
 #
 #
 
-def main(divergence='pearson', n_epochs=30, iter_per_epoch=3000, lr=0.01, wd=0.002, reg_coef=0.5, seed=2):
+def main(divergence='pearson', n_epochs=10, iter_per_epoch=3000, lr=0.01, wd=0.002, reg_coef=0.5, seed=2):
 
     seed_all(seed)
     xbound=[-50.0, 50.0, 0.5]
@@ -382,13 +371,13 @@ def main(divergence='pearson', n_epochs=30, iter_per_epoch=3000, lr=0.01, wd=0.0
         'zbound': zbound,
         'dbound': dbound,
     }
-    device = torch.device('cuda:7') if torch.cuda.is_available() else torch.device('cpu')
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
     #taskhead, aux_head, backbone = compile_model(grid_conf)
     model = compile_model(grid_conf)
 
-    model.load_state_dict(torch.load('./checkpoint.pt'))
-    model = model.to(device)
+    #model.load_state_dict(torch.load('./checkpoint.pt'))
+    #model = model.to(device)
 
     num_classes = 2 # binary seg
 
@@ -399,10 +388,10 @@ def main(divergence='pearson', n_epochs=30, iter_per_epoch=3000, lr=0.01, wd=0.0
     train_target = itertools.cycle(train_target)
 
     # define the loss function....
-    taskloss = nn.CrossEntropyLoss()
+    taskloss = nn.BCELoss(weight=torch.Tensor([5.0]))
     taskloss = taskloss.to(device)
 
-    # fDAL ----
+    # fDAL ---- [4, 2, 200, 200]
     #train_target = ForeverDataIterator(train_target)
     #train_source = ForeverDataIterator(train_source)
 
@@ -414,23 +403,26 @@ def main(divergence='pearson', n_epochs=30, iter_per_epoch=3000, lr=0.01, wd=0.0
 			   grl_params={"max_iters": 3000, "hi": 0.6, "auto_step": True})
 
     
-    
+    #learner = learner.to(device)
+
+    #learner = nn.DataParallel(learner)
+    learner = learner.to(device)
 
     # define the optimizer.
 
     # Hyperparams and scheduler follows CDAN.
     opt = optim.SGD(learner.parameters(), lr=lr, momentum=0.9, nesterov=True, weight_decay=wd)
-    opt_schedule = scheduler(opt, lr, decay_step_=iter_per_epoch * 5, gamma_=0.5)
+    opt_schedule = scheduler(opt, lr, decay_step_=iter_per_epoch * n_epochs, gamma_=0.7)
 
     #print(model.device,'model device')
-
+    train_step = 0
     print('Starting training...')
     for epochs in range(n_epochs):
         learner.train()
-        for i in range(iter_per_epoch):
+        for i in tqdm(range(1,iter_per_epoch)):
             opt_schedule.step()
             # batch data loading...
-            x_s, x_t, labels_s = sample_batch(train_source, train_target, device, i)
+            x_s, x_t, labels_s = sample_batch(train_source, train_target, device)
             # forward and loss
             loss, others = learner((x_s, x_t), labels_s)
             pred_s = others['pred_s']
@@ -438,19 +430,28 @@ def main(divergence='pearson', n_epochs=30, iter_per_epoch=3000, lr=0.01, wd=0.0
             opt.zero_grad()
             loss.backward()
             # avoid gradient issues if any early on training.
-            torch.nn.utils.clip_grad_norm_(learner.parameters(), 10)
+            torch.nn.utils.clip_grad_norm_(learner.parameters(), 10, error_if_nonfinite = True)
             opt.step()
-            if i % 1500 == 0:
+            if train_step % 1000 == 0:
                 _, _, iou = get_batch_iou(pred_s, labels_s)
-                print("Epoch",epochs, "train iou:", iou)
+                print(f"Epoch:{epochs} Iter:{i}. Task Loss:{others['taskloss']} Train iou:{iou} Total Loss {loss}")
+                #print("Epoch",epochs, "train iou:", iou)
+                #torch.cuda.empty_cache()
 
-        val_info = get_val_info(learner.get_reusable_model(True), test_loader, SimpleLoss, device)
+                val_info = get_val_info(learner.get_reusable_model(True), test_loader, SimpleLoss, device)
         
-        print(f"Epoch:{epochs} nuscenes loss: {val_info['loss']} nuscenes iou: {val_info['iou']}")
+                print(f"Epoch:{epochs} nuscenes loss: {val_info['loss']} nuscenes iou: {val_info['iou']}")
+                writer.add_scalar("Loss/Train", others['taskloss'], train_step)
+                writer.add_scalar("IOU/Train", iou, train_step)
+                writer.add_scalar("Loss/Test", val_info['loss'], train_step)
+                writer.add_scalar("IOU/Test", val_info['iou'], train_step)
+            train_step+=1
 
     # save the model.
     torch.save(learner.get_reusable_model(True).state_dict(), './checkpoint.pt')
     print('done.')
+    writer.flush()
+    writer.close()
 
 if __name__ == "__main__":
     fire.Fire(main)
